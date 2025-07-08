@@ -3,7 +3,7 @@ default:
   threads: 6
   producer_type: FutureProducer
   producer_config:
-    bootstrap.servers: localhost:9092
+    bootstrap.servers: kafka:9092
     queue.buffering.max.ms: 100
     queue.buffering.max.messages: 1000000
 

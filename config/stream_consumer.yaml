@@ -5,7 +5,7 @@ default:
   consumer_type: StreamConsumer
   topic: test_topic1
   consumer_config:
-    bootstrap.servers: localhost:9092
+    bootstrap.servers: kafka:9092
     group.id: 'benchmark_consumer_group'
     auto.offset.reset: smallest
     enable.auto.commit: false
@@ -23,3 +23,10 @@ scenarios:
   10KB_1GB:
     topic: benchmark_topic_10KB
     message_limit: 104858
+
+#    Запустите бенчмарк продюсера
+#  cargo run --release -- benchmark_type producer --config /config/base_producer.yaml --scenario your_producer_scenario_name
+
+#    Запустите бенчмарк потребителя
+#  cargo run --release --benchmark_type consumer --config /path/to/your/consumer_config.yaml --scenario your_consumer_scenario_name
+#  cargo run --release -- benchmark_type consumer --config /path/to/your/consumer_config.yaml --scenario your_consumer_scenario_name

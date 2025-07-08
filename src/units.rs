@@ -1,8 +1,10 @@
-use rdkafka::util::duration_to_millis;
-
 use std::fmt;
 use std::ops::{Add, AddAssign, Div};
-use std::time::Duration;
+use std::time::Duration; // std::time::Duration уже импортирован, и as_millis() является его методом
+
+// Удаляем 'use rdkafka::util::duration_to_millis;'
+// Удаляем также пользовательскую функцию 'duration_to_millis',
+// так как std::time::Duration::as_millis() предоставляет ту же функциональность.
 
 //
 // ********** SECONDS **********
@@ -13,10 +15,11 @@ pub struct Seconds(pub Duration);
 
 impl fmt::Display for Seconds {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // Используем self.0.as_millis() вместо duration_to_millis(self.0)
         if f.alternate() {
-            write!(f, "{:.3}", duration_to_millis(self.0) as f64 / 1000.0)
+            write!(f, "{:.3}", self.0.as_millis() as f64 / 1000.0)
         } else {
-            write!(f, "{:.3} seconds", duration_to_millis(self.0) as f64 / 1000.0)
+            write!(f, "{:.3} seconds", self.0.as_millis() as f64 / 1000.0)
         }
     }
 }
@@ -158,7 +161,8 @@ impl Div<Seconds> for Bytes {
 
 impl<T: Div<f64, Output=T> + fmt::Display + Copy> fmt::Display for Rate<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let duration_s = duration_to_millis(self.duration) as f64 / 1000f64;
+        // Используем self.duration.as_millis() вместо duration_to_millis(self.duration)
+        let duration_s = self.duration.as_millis() as f64 / 1000f64;
         if f.alternate() {
             write!(f, "{:#}", self.amount / duration_s)
         } else {
@@ -167,3 +171,6 @@ impl<T: Div<f64, Output=T> + fmt::Display + Copy> fmt::Display for Rate<T> {
     }
 }
 
+fn duration_to_millis(d: std::time::Duration) -> u64 {
+    d.as_secs() * 1000 + u64::from(d.subsec_millis())
+}

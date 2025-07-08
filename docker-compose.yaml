@@ -1,0 +1,111 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kafka-init-topics:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+      echo 'Waiting for Kafka to be ready...' &&
+      cub kafka-ready -b kafka:9092 1 20 &&
+      echo 'Creating Kafka topics...' &&    
+      kafka-topics --delete --topic benchmark_topic_10B --bootstrap-server kafka:9092 || true &&
+      kafka-topics --delete --topic benchmark_topic_1KB --bootstrap-server kafka:9092 || true &&
+      kafka-topics --delete --topic benchmark_topic_10KB --bootstrap-server kafka:9092 || true &&
+      sleep 2 &&  
+      kafka-topics --create --if-not-exists --topic benchmark_topic_10B --bootstrap-server kafka:9092 --partitions 24 --replication-factor 1 &&
+      kafka-topics --create --if-not-exists --topic benchmark_topic_1KB --bootstrap-server kafka:9092 --partitions 24 --replication-factor 1 &&
+      kafka-topics --create --if-not-exists --topic benchmark_topic_10KB --bootstrap-server kafka:9092 --partitions 24 --replication-factor 1 &&
+      echo 'Kafka topics created successfully!'
+      "
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark
+      POSTGRES_DB: benchmark
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./config/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kafka-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      kafka-init-topics:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+    command: /entrypoint.sh  
+    # command: ... # если нужно, укажите команду запуска приложения
+
+
+
+#    command: kafka-benchmark producer /app/config/base_producer.yaml 10B_bursts
+    # Изменяем bootstrap.servers в файле конфигурации,
+    # чтобы он указывал на имя сервиса Kafka в Docker Compose сети
+    # Это можно сделать через volume mount или через sed в Dockerfile,
+    # но лучше изменить конфиг на localhost:9092 и использовать host.docker.internal
+    # как показано в первом варианте, если Kafka вне Compose.
+    # В Compose сети, 'kafka' будет hostname брокера.
+
+#  docker-compose up --build
+#  docker compose down --volumes --rmi all
+#  docker system prune -f --volumes # Очищает кэш, неиспользуемые контейнеры/образы
+#  docker-compose down -v
+
+
+    # docker exec -it postgres bash     Зайти в контейнер PostgreSQL
+    # psql -U benchmark -d benchmark    Подключиться к PostgreSQL внутри контейнера
+    # \dt                               Показать список всех таблиц
+    # SELECT * FROM messages;
+    # \q                                Выйти из psql
+    # exit                              Выйти из контейнера

@@ -5,16 +5,16 @@ default:
   consumer_type: BaseConsumer
   topic: test_topic1
   consumer_config:
-    bootstrap.servers: localhost:9092
+    bootstrap.servers: kafka:9092
     group.id: 'benchmark_consumer_group'
-    auto.offset.reset: smallest
+    auto.offset.reset: earliest
     enable.auto.commit: false
     session.timeout.ms: 6000
 
 scenarios:
   10B_100MB:
     topic: benchmark_topic_10B
-    message_limit: 10485760
+    message_limit: 250000
 
   1KB_1GB:
     topic: benchmark_topic_1KB
@@ -23,3 +23,4 @@ scenarios:
   10KB_1GB:
     topic: benchmark_topic_10KB
     message_limit: 104858
+

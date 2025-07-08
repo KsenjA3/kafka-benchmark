@@ -1,15 +1,12 @@
-use futures::{self, Future};
 use rdkafka::ClientContext;
-use rdkafka::error::{KafkaError, RDKafkaError};
-use rdkafka::producer::future_producer::DeliveryFuture;
-use rdkafka::producer::{BaseProducer, DeliveryResult, FutureProducer, ProducerContext};
+use rdkafka::producer::{BaseProducer, DeliveryResult, ProducerContext, Producer, BaseRecord};
 
 use std::cmp;
 use std::iter::{IntoIterator, Iterator};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod content;
 
@@ -46,79 +43,8 @@ fn base_producer_thread(
     scenario: &ProducerScenario,
     cache: &CachedMessages,
 ) -> ThreadStats {
-    let producer_context = BenchmarkProducerContext::new();
-    let failure_counter = Arc::clone(&producer_context.failure_counter);
-    let producer: BaseProducer<BenchmarkProducerContext> = scenario.client_config()
-        .create_with_context(producer_context)
-        .expect("Producer creation failed");
-    producer
-        .send_copy::<str, str>(&scenario.topic, None, Some("warmup"), None, (), None)
-        .expect("Producer error");
-    failure_counter.store(0, Ordering::Relaxed);
-    producer.flush(Duration::from_secs(10));
-
-    let per_thread_messages = if thread_id == 0 {
-        scenario.message_count - scenario.message_count / scenario.threads * (scenario.threads - 1)
-    } else {
-        scenario.message_count / scenario.threads
-    };
-    let start = Instant::now();
-    for (count, content) in cache.into_iter().take(per_thread_messages as usize).enumerate() {
-        loop {
-            match producer.send_copy::<[u8], [u8]>(
-                &scenario.topic,
-                Some(count as i32 % 3),
-                Some(content),
-                None,
-                (),
-                None,
-            ) {
-                Err(KafkaError::MessageProduction(RDKafkaError::QueueFull)) => {
-                    producer.poll(Duration::from_millis(10));
-                    continue;
-                }
-                Err(e) => {
-                    println!("Error {:?}", e);
-                    break;
-                }
-                Ok(_) => break,
-            }
-        }
-        producer.poll(Duration::from_secs(0));
-    }
-    producer.flush(Duration::from_secs(120));
-    ThreadStats::new(start.elapsed(), failure_counter.load(Ordering::Relaxed))
-}
-
-fn wait_all(futures: Vec<DeliveryFuture>) -> usize {
-    let mut failures = 0;
-    for future in futures {
-        match future.wait() {
-            Ok(Err(e)) => {
-                println!("Kafka error: {:?}", e);
-                failures += 1;
-            }
-            Err(futures::Canceled) => {
-                println!("Future cancelled");
-                failures += 1;
-            }
-            Ok(_) => {}
-        }
-    }
-    failures
-}
-
-fn future_producer_thread(
-    thread_id: u64,
-    scenario: &ProducerScenario,
-    cache: &CachedMessages,
-) -> ThreadStats {
-    let producer: FutureProducer<_> = scenario.client_config()
+    let producer: BaseProducer<_> = scenario.client_config()
         .create().expect("Producer creation failed");
-    let _ = producer
-        .send_copy::<str, str>(&scenario.topic, None, Some("warmup"), None, None, 1000)
-        .wait();
-
     let per_thread_messages = if thread_id == 0 {
         scenario.message_count - scenario.message_count / scenario.threads * (scenario.threads - 1)
     } else {
@@ -126,24 +52,30 @@ fn future_producer_thread(
     };
     let start = Instant::now();
     let mut failures = 0;
-    let mut futures = Vec::with_capacity(1_000_000);
     for (count, content) in cache.into_iter().take(per_thread_messages as usize).enumerate() {
-        futures.push(producer.send_copy::<[u8], [u8]>(
-            &scenario.topic,
-            Some(count as i32 % 3),
-            Some(content),
-            None,
-            None,
-            -1,
-        ));
-        if futures.len() >= 1_000_000 {
-            failures += wait_all(futures);
-            futures = Vec::with_capacity(1_000_000);
+        let payload = scenario_name_timestamp_payload(scenario, content);
+        let partition = (count as i32 % 24) as i32;
+        let record = BaseRecord::to(&scenario.topic)
+            .payload(&payload)
+            .key(&[])
+            .partition(partition);
+        if let Err((e, _)) = producer.send(record) {
+            println!("Kafka error: {:?}", e);
+            failures += 1;
         }
     }
-    failures += wait_all(futures);
-    producer.flush(Duration::from_secs(120));
+    producer.flush(Duration::from_secs(10));
     ThreadStats::new(start.elapsed(), failures)
+}
+
+
+
+fn scenario_name_timestamp_payload(_scenario: &ProducerScenario, content: &[u8]) -> Vec<u8> {
+    let start_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let mut payload = start_timestamp.to_string().into_bytes();
+    payload.push(b':');
+    payload.extend_from_slice(content);
+    payload
 }
 
 pub fn run(config: &ProducerBenchmark, scenario_name: &str) {
@@ -166,10 +98,7 @@ pub fn run(config: &ProducerBenchmark, scenario_name: &str) {
                 let scenario = scenario.clone();
                 let cache = Arc::clone(&cache);
                 thread::spawn(move || {
-                    match scenario.producer_type {
-                        ProducerType::BaseProducer => base_producer_thread(thread_id, &scenario, &cache),
-                        ProducerType::FutureProducer => future_producer_thread(thread_id, &scenario, &cache),
-                    }
+                    base_producer_thread(thread_id, &scenario, &cache)
                 })
             })
             .collect::<Vec<_>>();
@@ -225,8 +154,9 @@ impl<'a> ProducerRunStats<'a> {
 
     pub fn print(&self) {
         let time = Seconds(self.duration);
-        let messages = Messages::from(self.scenario.message_count);
-        let bytes = Bytes::from(self.scenario.message_count * self.scenario.message_size);
+        let expected_messages = self.scenario.message_count;
+        let messages = Messages::from(expected_messages);
+        let bytes = Bytes::from(expected_messages * self.scenario.message_size);
 
         if self.failure_count != 0 {
             println!(
@@ -237,7 +167,7 @@ impl<'a> ProducerRunStats<'a> {
 
         println!(
             "* Produced {} ({}) in {} using {} thread{}\n    {}\n    {}",
-            messages,
+            expected_messages,
             bytes,
             time,
             self.scenario.threads,
@@ -267,7 +197,8 @@ impl<'a> ProducerBenchmarkStats<'a> {
 
     pub fn print(&self) {
         let time = Seconds(self.stats.iter().map(|stat| stat.duration).sum());
-        let messages = Messages::from(self.scenario.message_count * self.stats.len() as u64);
+        let expected_messages = self.scenario.message_count * self.stats.len() as u64;
+        let messages = Messages::from(expected_messages);
         let bytes = Bytes(messages.0 * self.scenario.message_size as f64);
 
         println!("Average: {}, {}", messages / time, bytes / time);
